@@ -1,0 +1,271 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>GeoJSON Veri Birleştirme Aracı</title>
+    <!-- Tailwind CSS CDN -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        /* Inter font kullanımı */
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #f7fafc;
+        }
+        /* Özelleştirilmiş scrollbar */
+        .geojson-output {
+            max-height: 400px;
+            overflow-y: auto;
+            white-space: pre-wrap;
+            word-wrap: break-word;
+        }
+    </style>
+</head>
+<body class="p-4 sm:p-8">
+
+    <div class="max-w-4xl mx-auto bg-white shadow-xl rounded-2xl p-6 md:p-10">
+        <header class="mb-8 border-b pb-4">
+            <h1 class="text-3xl font-extrabold text-blue-800 mb-2">GeoJSON Veri Birleştirme Aracı</h1>
+            <p class="text-gray-600">İki dosyayı coğrafi birim düzey kodu üzerinden eşleştirerek tek bir çıktı alın.</p>
+            <p class="text-sm text-gray-500 mt-2 p-2 bg-yellow-50 rounded-lg border border-yellow-200">
+                ✅ **Otomatik Eşleştirme:** Eşleştirme anahtarı otomatik olarak **`duzeyKodu`** özelliği olarak belirlenmiştir ve yüklenen JSON verisinin (`veriler` dizisi) yapısına göre uyarlandı.
+            </p>
+        </header>
+
+        <!-- Dosya Yükleme Alanı -->
+        <section class="space-y-6 mb-8">
+            <div class="p-5 bg-blue-50 border border-blue-200 rounded-xl">
+                <label for="baseFile" class="block text-lg font-semibold text-blue-700 mb-2">
+                    1. Temel GeoJSON Dosyası (Örn: Türkiye İlleri Sınırları)
+                </label>
+                <p class="text-sm text-gray-500 mb-3">Bu dosyanın coğrafyası (geometri) korunacaktır. (.geojson uzantılı)</p>
+                <input type="file" id="baseFile" accept=".geojson" class="w-full text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-blue-100 file:text-blue-700 hover:file:bg-blue-200 cursor-pointer"/>
+            </div>
+
+            <div class="p-5 bg-green-50 border border-green-200 rounded-xl">
+                <label for="datafile" class="block text-lg font-semibold text-green-700 mb-2">
+                    2. Eklenecek Veri Dosyası (Örn: TÜİK/İBB Verileri)
+                </label>
+                <p class="text-sm text-gray-500 mb-3">Bu dosya bir **GeoJSON değildir**. İçindeki `veriler` dizisi eşleştirilerek eklenecektir. (.json uzantılı)</p>
+                <input type="file" id="datafile" accept=".json" class="w-full text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-green-100 file:text-green-700 hover:file:bg-green-200 cursor-pointer"/>
+            </div>
+            
+            <button id="mergeButton" onclick="startMerge()" class="w-full py-3 px-4 bg-indigo-600 hover:bg-indigo-700 text-white font-bold rounded-xl shadow-lg transition duration-300 transform hover:scale-[1.01] disabled:bg-indigo-300">
+                GeoJSON'ları Birleştir ve Çıktı Oluştur
+            </button>
+        </section>
+
+        <!-- Durum ve Hata Mesajları -->
+        <div id="statusMessage" class="mb-6 p-4 text-sm rounded-lg transition-all duration-300 hidden" role="alert"></div>
+
+        <!-- Çıktı Alanı -->
+        <section id="outputSection" class="mt-8 border-t pt-6 hidden">
+            <h2 class="text-2xl font-bold text-gray-800 mb-4">Birleştirilmiş GeoJSON Çıktısı</h2>
+            <button id="downloadButton" class="mb-4 py-2 px-4 bg-red-600 hover:bg-red-700 text-white font-semibold rounded-lg transition duration-300">
+                GeoJSON Olarak İndir (.geojson)
+            </button>
+
+            <div class="bg-gray-100 p-4 rounded-xl border border-gray-300">
+                <p class="text-sm font-medium text-gray-700 mb-2">Aşağıdaki JSON metnini Mapbox Datasets'e kopyalayıp yapıştırabilirsiniz:</p>
+                <pre id="geojsonOutput" class="geojson-output text-xs text-gray-800"></pre>
+            </div>
+        </section>
+    </div>
+
+    <script>
+        document.addEventListener('DOMContentLoaded', () => {
+            document.getElementById('downloadButton').addEventListener('click', downloadGeoJSON);
+        });
+
+        const statusMessage = document.getElementById('statusMessage');
+        const geojsonOutput = document.getElementById('geojsonOutput');
+        const outputSection = document.getElementById('outputSection');
+        const mergeButton = document.getElementById('mergeButton');
+        const baseFile = document.getElementById('baseFile');
+        const dataFile = document.getElementById('datafile');
+
+        /**
+         * Durum mesajını gösterir veya gizler.
+         */
+        function showStatus(message, type) {
+            statusMessage.textContent = message;
+            statusMessage.className = `mb-6 p-4 text-sm rounded-lg transition-all duration-300`;
+            
+            if (type === 'error') {
+                statusMessage.classList.add('bg-red-100', 'text-red-700', 'border', 'border-red-400');
+            } else if (type === 'success') {
+                statusMessage.classList.add('bg-green-100', 'text-green-700', 'border', 'border-green-400');
+            } else {
+                statusMessage.classList.add('bg-blue-100', 'text-blue-700', 'border', 'border-blue-400');
+            }
+            statusMessage.classList.remove('hidden');
+        }
+
+        /**
+         * Dosyayı okur ve içeriği döndürür.
+         */
+        function readFileAsync(file) {
+            return new Promise((resolve, reject) => {
+                const reader = new FileReader();
+                reader.onload = (event) => resolve(event.target.result);
+                reader.onerror = (error) => reject(error);
+                reader.readAsText(file);
+            });
+        }
+
+        /**
+         * İki GeoJSON dosyasını birleştirme işlemini başlatır.
+         */
+        async function startMerge() {
+            mergeButton.disabled = true;
+            mergeButton.textContent = "Birleştiriliyor... Lütfen Bekleyin.";
+            outputSection.classList.add('hidden');
+            showStatus("Dosyalar okunuyor ve işleniyor...", 'info');
+
+            const file1 = baseFile.files[0];
+            const file2 = dataFile.files[0];
+            
+            // Kullanıcı isteği üzerine eşleştirme anahtarı otomatik olarak 'duzeyKodu' olarak belirlendi.
+            const mergeKey = "duzeyKodu"; 
+
+            if (!file1 || !file2) {
+                showStatus("Lütfen hem temel GeoJSON dosyasını, hem de JSON veri dosyasını yükleyin.", 'error');
+                mergeButton.disabled = false;
+                mergeButton.textContent = "GeoJSON'ları Birleştir ve Çıktı Oluştur";
+                return;
+            }
+            
+            try {
+                // 1. Dosyaları Oku
+                const content1 = await readFileAsync(file1);
+                const content2 = await readFileAsync(file2);
+
+                // 2. JSON'a Çevir
+                const geojson1 = JSON.parse(content1); // GeoJSON Base
+                const jsonData = JSON.parse(content2); // TÜIK/IBB Data JSON
+
+                // 3. Birleştirme İşlemini Başlat
+                const mergedGeoJSON = mergeDataIntoGeoJSON(geojson1, jsonData, mergeKey);
+
+                // 4. Çıktıyı Göster
+                const formattedOutput = JSON.stringify(mergedGeoJSON, null, 2);
+                geojsonOutput.textContent = formattedOutput;
+                outputSection.classList.remove('hidden');
+                
+                showStatus(`Başarıyla ${mergedGeoJSON.features.length} özellik birleştirildi. Çıktı aşağıdadır.`, 'success');
+
+                // İndirme butonuna birleştirilmiş veriyi kaydet
+                document.getElementById('downloadButton').dataset.geojson = formattedOutput;
+
+            } catch (error) {
+                console.error("Birleştirme hatası:", error);
+                // JSON parse hatası veya yapısal hataları yakalarız
+                showStatus(`Birleştirme sırasında kritik bir hata oluştu: Lütfen GeoJSON ve Veri JSON'ının doğru formatta olduğundan emin olun. Hata mesajı: ${error.message}`, 'error');
+            } finally {
+                mergeButton.disabled = false;
+                mergeButton.textContent = "GeoJSON'ları Birleştir ve Çıktı Oluştur";
+            }
+        }
+
+        /**
+         * JSON verisini GeoJSON nesnesine entegre eder.
+         * Yeni özellikler, veri başlığı ve yıla göre adlandırılarak eklenir.
+         * @param {object} baseGeoJSON - Temel GeoJSON (geometriyi sağlar).
+         * @param {object} jsonData - Eklenecek JSON verisi (veriler dizisi içerir).
+         * @param {string} mergeKey - Özelliklerdeki eşleştirme anahtarı (duzeyKodu).
+         * @returns {object} Birleştirilmiş GeoJSON.
+         */
+        function mergeDataIntoGeoJSON(baseGeoJSON, jsonData, mergeKey) {
+            // Temel GeoJSON yapısı kontrolü
+            if (baseGeoJSON.type !== "FeatureCollection" || !Array.isArray(baseGeoJSON.features)) {
+                throw new Error("Temel dosya geçerli bir 'FeatureCollection' GeoJSON dosyası olmalıdır.");
+            }
+            
+            // JSON veri yapısı kontrolü ve verilerin çıkarılması
+            if (!jsonData.veriler || !Array.isArray(jsonData.veriler)) {
+                throw new Error("Eklenecek Veri Dosyası (JSON) 'veriler' adında bir dizi içermelidir.");
+            }
+
+            const dataMap = new Map();
+            let mergeCount = 0;
+            
+            // JSON verisinden anahtar bilgileri çıkar
+            const indicatorName = jsonData.gosterge_ad || "veri_gosterge_ad";
+            const indicatorNo = jsonData.gostergeNo || "veri_gosterge_no";
+            const dates = jsonData.tarihler || [];
+            
+            // 1. Veri Haritasını (DataMap) Oluştur
+            for (const dataItem of jsonData.veriler) {
+                const key = dataItem[mergeKey];
+                
+                if (key) {
+                    const newProperties = {
+                        [`data_gosterge_ad`]: indicatorName,
+                        [`data_gosterge_no`]: indicatorNo,
+                        // Veri dizisindeki değerleri tarihler ile eşleştirerek nesneye ekle
+                        ...dataItem.veri.reduce((acc, value, index) => {
+                            // Property adını "data_<YIL>" formatında oluştur
+                            const year = dates[index] || `no_year_${index}`;
+                            acc[`data_${year}`] = value;
+                            return acc;
+                        }, {})
+                    };
+
+                    // Anahtar büyük/küçük harf duyarlılığı olmadan eşleşsin (toUpperCase)
+                    dataMap.set(String(key).toUpperCase(), newProperties);
+                }
+            }
+
+            // 2. Temel GeoJSON'a Veriyi Ekle
+            const mergedGeoJSON = JSON.parse(JSON.stringify(baseGeoJSON));
+
+            for (const feature of mergedGeoJSON.features) {
+                const baseKey = feature.properties?.[mergeKey];
+                
+                if (baseKey) {
+                    const lookupKey = String(baseKey).toUpperCase();
+                    const matchingProperties = dataMap.get(lookupKey);
+
+                    if (matchingProperties) {
+                        // Eşleşen verileri (properties) temel özelliğe ekle
+                        feature.properties = {
+                            ...feature.properties, 
+                            ...matchingProperties,
+                            // Eşleşen anahtarın büyük/küçük harf tutarlılığını korur
+                            [mergeKey]: baseKey 
+                        };
+                        mergeCount++;
+                    } else {
+                        console.warn(`Uyarı: GeoJSON'da '${baseKey}' (${mergeKey}) anahtarı için veri dosyasında eşleşme bulunamadı.`);
+                    }
+                }
+            }
+            
+            console.log(`Toplam ${mergeCount} özellik başarıyla birleştirildi.`);
+            return mergedGeoJSON;
+        }
+
+        /**
+         * Birleştirilmiş GeoJSON çıktısını indirir.
+         */
+        function downloadGeoJSON() {
+            const geojson = document.getElementById('downloadButton').dataset.geojson;
+            if (!geojson) {
+                showStatus("İndirilecek veri bulunamadı. Lütfen önce birleştirme işlemini yapın.", 'error');
+                return;
+            }
+
+            const blob = new Blob([geojson], { type: 'application/json' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = 'birlesmis_veri_' + new Date().toISOString().slice(0, 10) + '.geojson';
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+        }
+    </script>
+
+</body>
+</html>
